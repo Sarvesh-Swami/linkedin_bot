@@ -1,0 +1,16 @@
+[
+  {"action": "login_linkedin"},
+
+  {"action": "pause_for_user", "message": "If LinkedIn is showing a security check, CAPTCHA, or 2FA code prompt, solve it now in the browser window. Otherwise just press Enter to continue."},
+
+  {"action": "screenshot", "name": "after_login"},
+
+  {"action": "goto", "url": "https://www.linkedin.com/jobs/"},
+  {"action": "wait", "seconds": 2},
+
+  {"action": "search_linkedin_jobs", "query": "founder's office"},
+  {"action": "wait", "seconds": 2},
+
+  {"action": "screenshot", "name": "job_search_results"},
+  {"action": "extract", "selector": ".job-card-list__title, .base-search-card__title", "save_as": "job_titles"}
+]
