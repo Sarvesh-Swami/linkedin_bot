@@ -10,7 +10,7 @@
 
   {"action": "search_linkedin_jobs", "query": "founder's office"},
   {"action": "wait", "seconds": 2},
-
   {"action": "screenshot", "name": "job_search_results"},
-  {"action": "extract", "selector": ".job-card-list__title, .base-search-card__title", "save_as": "job_titles"}
+
+  {"action": "scrape_job_companies", "output_file": "companies.txt", "max_pages": 10}
 ]

@@ -2,136 +2,118 @@
 browser_agent.py
 =================
 
-A starter browser-automation agent.
+Logs into LinkedIn (you complete the login by hand), then navigates
+directly to a LinkedIn jobs *search-results* URL (no clicking through
+the search box or the Jobs tab -- we just go straight there), and
+scrolls through the results extracting each listing's company name,
+saving every unique one to a text file.
 
-WHAT THIS VERSION DOES
------------------------
-- Launches a real browser (Chromium, via Playwright).
-- Executes a FIXED, sequential list of steps you provide (a "task list"):
-  goto a URL, click something, type into a search box, press Enter,
-  open a new tab, switch tabs, close a tab, scroll, wait, extract text,
-  and take a screenshot.
-- After every step, it takes a screenshot and (optionally) sends that
-  screenshot to a locally running open-source vision model (via Ollama,
-  e.g. "llava" or "llama3.2-vision") to get a plain-English description
-  of what's on screen. That description is saved along with the rest of
-  the step's log, so you get a "details" record of the whole run.
-- Saves everything (step log + AI descriptions + extracted text) to a
-  JSON file, plus a screenshot per step, in an output folder.
+FLOW
+----
+1. Go to the LinkedIn login page and PAUSE so you can log in by hand
+   (credentials, 2FA, security checkpoints, etc.). The script never
+   fills in, stores, or reads any LinkedIn credentials itself.
+2. Confirm the session actually reached the feed.
+3. Navigate directly to a jobs search-results URL, e.g.:
+     https://www.linkedin.com/jobs/search/?keywords=founder%27s%20office&origin=SWITCH_SEARCH_VERTICAL
+4. Scroll through the job results (LinkedIn loads more as you scroll),
+   extract each listing's company name, and append new/unique ones to
+   a text file as they're found.
 
-WHAT THIS VERSION DOES NOT DO YET
-----------------------------------
-It does not let the AI model *decide* what to click next on its own -
-you tell it the steps. That's the natural next iteration: instead of
-"click selector X", a step would say "click whatever looks like the
-search icon", and the vision model would figure out where that is on
-the screenshot. The code below is structured so that upgrade is a
-small, contained change (see `analyze_screenshot_with_ai` and the
-`ai_click` stub near the bottom).
+No task-list JSON, no screenshots, no AI vision model, no clicking
+through the search box / Jobs tab -- this goes straight to the results
+URL and scrapes the real page elements directly.
+
+A NOTE ON SELECTORS
+--------------------
+LinkedIn's CSS classes on these cards are auto-generated hashes (e.g.
+"_7acc3727") that can change on every deploy, so this script deliberately
+avoids matching on them. Instead it anchors on things much more likely
+to stay stable:
+  - the `componentkey` attribute on the job-card container
+    (e.g. "job-card-component-ref-4461860947")
+  - and, for title/company/location, simple ORDER within the card
+    (the 1st, 2nd, and 3rd <p> elements) rather than their exact class.
+
+If a run logs "No job cards appeared", it saves the current page's HTML
+to debug_page.html so you can open it, find the real markup, and send
+me the relevant snippet.
 
 INSTALL
 -------
-    pip install playwright requests
+    pip install playwright
     playwright install chromium
-
-    # Optional, only needed if you want AI screenshot descriptions:
-    # 1. Install Ollama: https://ollama.com
-    # 2. Pull a vision model, e.g.:
-    #      ollama pull llava
-    # 3. Make sure `ollama serve` is running (it usually runs automatically).
 
 RUN
 ---
-    python browser_agent.py --tasks example_task.json --output ./run_output
-
-    # Without AI descriptions (faster, no Ollama needed):
-    python browser_agent.py --tasks example_task.json --output ./run_output --no-ai
-
-TASK FILE FORMAT
-----------------
-A JSON file containing a list of steps. See example_task.json for a
-full working example. Supported actions:
-
-    {"action": "goto",       "url": "https://example.com"}
-    {"action": "wait",       "seconds": 2}
-    {"action": "click",      "selector": "#some-button"}
-    {"action": "type",       "selector": "input[name='q']", "text": "hello", "clear": true}
-    {"action": "press",      "key": "Enter"}
-    {"action": "search",     "selector": "input[name='q']", "query": "laptops"}
-    {"action": "scroll",     "pixels": 800}
-    {"action": "new_tab",    "url": "https://example.com/other"}
-    {"action": "switch_tab", "index": 0}
-    {"action": "close_tab",  "index": 1}          # "index" optional -> closes current tab
-    {"action": "extract",    "selector": ".title", "save_as": "titles"}
-    {"action": "screenshot", "name": "before_search"}
+    python browser_agent.py
+    python browser_agent.py --keywords "founder's office"
+    python browser_agent.py --url "https://www.linkedin.com/jobs/search/?keywords=founder%27s%20office&origin=SWITCH_SEARCH_VERTICAL"
 """
 
 import argparse
-import base64
-import json
-import os
+import logging
 import sys
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from playwright.sync_api import sync_playwright
 
-try:
-    import requests
-except ImportError:
-    requests = None
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()  # reads a .env file in the current directory, if present
-except ImportError:
-    pass  # dotenv is optional; you can also set env vars another way
+def setup_logging(verbose: bool = False) -> logging.Logger:
+    logger = logging.getLogger("browser_agent")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console.setFormatter(fmt)
+    logger.addHandler(console)
+
+    return logger
 
 
 # --------------------------------------------------------------------------
-# Optional: open-source vision model integration (via Ollama, running locally)
+# LinkedIn config
 # --------------------------------------------------------------------------
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llava"  # any local vision model you've pulled, e.g. "llama3.2-vision"
+DEFAULT_KEYWORDS = "founder's office"
+JOBS_SEARCH_URL_TEMPLATE = "https://www.linkedin.com/jobs/search/?keywords={keywords}&origin=SWITCH_SEARCH_VERTICAL"
 
+# LIST of candidates, tried in order until one matches. The first entry
+# is confirmed from real page inspection (classic /jobs/search/ UI, card
+# has both class "job-card-container" and a data-job-id attribute holding
+# the literal job posting ID -- about as stable an anchor as you get).
+# The rest are fallbacks for other UI variants LinkedIn may serve.
+JOB_CARD_SELECTORS = [
+    "div.job-card-container[data-job-id]",
+    "div[componentkey^='job-card-component-ref-']",
+    "li.jobs-search-results__list-item",
+    "div.job-card-container",
+    "div.base-search-card",
+    "li.scaffold-layout__list-item",
+]
 
-def analyze_screenshot_with_ai(image_path: str, question: str = None) -> str:
-    """
-    Send a screenshot to a locally running open-source vision model (via
-    Ollama) and get back a text description. Returns "" on any failure so
-    that a missing/unavailable model never crashes the run.
+# Specific, known selectors for the company name WITHIN a card -- tried
+# first, before falling back to "2nd <p> in the card" (see
+# _extract_job_info). ".artdeco-entity-lockup__subtitle" is confirmed
+# from real page inspection to hold the company name on the classic UI.
+# Add new ones here if a run's debug_page.html shows something different.
+COMPANY_NAME_SELECTORS_WITHIN_CARD = [
+    ".artdeco-entity-lockup__subtitle",
+    ".job-card-container__primary-description",
+    ".base-search-card__subtitle",
+    "h4.base-search-card__subtitle",
+]
 
-    This is the hook you'll extend later to let the AI choose actions
-    (e.g. return element coordinates instead of a description).
-    """
-    if requests is None:
-        return ""
-
-    question = question or (
-        "Describe what is visible on this webpage screenshot in 1-3 "
-        "sentences: what page/section it looks like, and any key content, "
-        "buttons, or forms you can see."
-    )
-
-    try:
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": question,
-                "images": [image_b64],
-                "stream": False,
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        return response.json().get("response", "").strip()
-    except Exception as e:
-        return f"[AI description unavailable: {e}]"
+# Pagination "Next" button, at the bottom of the results list.
+NEXT_PAGE_BUTTON_SELECTORS = [
+    "button[aria-label='Next']",
+    "button.artdeco-pagination__button--next",
+]
 
 
 # --------------------------------------------------------------------------
@@ -139,249 +121,405 @@ def analyze_screenshot_with_ai(image_path: str, question: str = None) -> str:
 # --------------------------------------------------------------------------
 
 class BrowserAgent:
-    def __init__(self, output_dir: str, headless: bool = False, use_ai: bool = True):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.shots_dir = self.output_dir / "screenshots"
-        self.shots_dir.mkdir(exist_ok=True)
-
+    def __init__(self, headless: bool = False, channel: str = None, verbose: bool = False):
+        self.logger = setup_logging(verbose=verbose)
         self.headless = headless
-        self.use_ai = use_ai
-
-        self.log = []          # list of per-step records
-        self.extracted = {}    # data saved via "extract" steps
-        self.tabs = []         # open pages/tabs
-        self.active_tab = 0
+        self.channel = channel  # e.g. "chrome" to use installed Chrome, not bundled Chromium
 
         self._playwright = None
         self.browser = None
         self.context = None
+        self.page = None
 
     # -- lifecycle -----------------------------------------------------
 
     def start(self):
+        self.logger.info(
+            f"Starting browser (headless={self.headless}, "
+            f"channel={self.channel or 'bundled chromium'}) -- fresh, logged-out profile."
+        )
         self._playwright = sync_playwright().start()
-        self.browser = self._playwright.chromium.launch(headless=self.headless)
+
+        launch_kwargs = {"headless": self.headless}
+        if self.channel:
+            launch_kwargs["channel"] = self.channel
+
+        self.browser = self._playwright.chromium.launch(**launch_kwargs)
         self.context = self.browser.new_context()
-        page = self.context.new_page()
-        self.tabs = [page]
-        self.active_tab = 0
+        self.page = self.context.new_page()
+
+        self.logger.info("Browser started.")
 
     def close(self):
+        self.logger.info("Closing browser.")
+        if self.context:
+            self.context.close()
         if self.browser:
             self.browser.close()
         if self._playwright:
             self._playwright.stop()
 
-    @property
-    def page(self):
-        return self.tabs[self.active_tab]
-
-    # -- core actions ----------------------------------------------------
-
-    def goto(self, url: str):
-        self.page.goto(url, wait_until="domcontentloaded")
-
-    def wait(self, seconds: float):
-        time.sleep(seconds)
-
-    def click(self, selector: str, timeout: int = 10000):
-        self.page.click(selector, timeout=timeout)
-
-    def type_text(self, selector: str, text: str, clear: bool = True):
-        if clear:
-            self.page.fill(selector, "")
-        self.page.type(selector, text, delay=30)
-
-    def press_key(self, key: str):
-        self.page.keyboard.press(key)
-
-    def search(self, selector: str, query: str):
-        """Fill a search box and press Enter."""
-        self.page.fill(selector, query)
-        self.page.press(selector, "Enter")
-
-    def scroll(self, pixels: int = 600):
+    def scroll(self, pixels: int = 1400):
         self.page.mouse.wheel(0, pixels)
 
-    def new_tab(self, url: str = None):
-        page = self.context.new_page()
-        if url:
-            page.goto(url, wait_until="domcontentloaded")
-        self.tabs.append(page)
-        self.active_tab = len(self.tabs) - 1
-
-    def switch_tab(self, index: int):
-        if 0 <= index < len(self.tabs):
-            self.active_tab = index
-        else:
-            raise IndexError(f"No tab at index {index} (have {len(self.tabs)} tabs)")
-
-    def close_tab(self, index: int = None):
-        idx = self.active_tab if index is None else index
-        if not (0 <= idx < len(self.tabs)):
-            raise IndexError(f"No tab at index {idx} (have {len(self.tabs)} tabs)")
-        self.tabs[idx].close()
-        del self.tabs[idx]
-        if not self.tabs:
-            # keep at least one tab open
-            self.tabs.append(self.context.new_page())
-        self.active_tab = min(self.active_tab, len(self.tabs) - 1)
-
-    def extract(self, selector: str, save_as: str = None):
-        elements = self.page.query_selector_all(selector)
-        texts = [el.inner_text().strip() for el in elements]
-        if save_as:
-            self.extracted[save_as] = texts
-        return texts
-
-    def screenshot(self, name: str = None) -> str:
-        name = name or f"step_{len(self.log)}"
-        path = self.shots_dir / f"{name}.png"
-        self.page.screenshot(path=str(path))
-        return str(path)
-
-    # -- LinkedIn-specific helpers -----------------------------------------
-
-    def login_linkedin(self):
-        """
-        Logs into LinkedIn using LINKEDIN_EMAIL / LINKEDIN_PASSWORD from
-        environment variables (loaded from a .env file). Credentials are
-        never written into the task list or the log file.
-        """
-        email = os.environ.get("LINKEDIN_EMAIL")
-        password = os.environ.get("LINKEDIN_PASSWORD")
-        if not email or not password:
-            raise RuntimeError(
-                "LINKEDIN_EMAIL / LINKEDIN_PASSWORD not found in environment. "
-                "Check that your .env file exists and python-dotenv is installed."
-            )
-
-        self.page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
-        self.page.fill("#username", email)
-        self.page.fill("#password", password)
-        self.page.click("button[type='submit']")
-        # give LinkedIn a moment to redirect to the feed (or to a
-        # checkpoint/2FA page, which pause_for_user can handle below)
-        self.page.wait_for_load_state("domcontentloaded")
-
-    def search_linkedin_jobs(self, query: str):
-        """
-        Uses LinkedIn's own jobs search box to search for a keyword.
-        Assumes you're already on/near https://www.linkedin.com/jobs/.
-        """
-        search_selector = "input[aria-label='Search by title, skill, or company']"
-        self.page.wait_for_selector(search_selector, timeout=15000)
-        self.page.fill(search_selector, query)
-        self.page.press(search_selector, "Enter")
+    # -- login -----------------------------------------------------------
 
     def pause_for_user(self, message: str = "Press Enter in this terminal to continue..."):
         """
         Blocks the script and waits for you to press Enter in the terminal.
-        Use this if LinkedIn shows a security checkpoint, CAPTCHA, or 2FA
-        prompt -- solve it yourself in the visible browser window, then
-        come back to the terminal and press Enter to resume the script.
+        Solve any login form / 2FA / security checkpoint / CAPTCHA by hand
+        in the visible browser window, then come back here and press Enter.
         This script does not attempt to solve or bypass any of those itself.
         """
+        self.logger.info(f"PAUSED: {message}")
         input(f"\n[PAUSED] {message}\n")
+        self.logger.info("Resumed by user.")
 
-    # -- experimental: AI-guided click (next iteration starting point) ----
+    def login_linkedin(self):
+        """
+        Navigates to the LinkedIn login page and then PAUSES so you can log
+        in yourself in the visible browser window. Once you resume, checks
+        whether you actually reached the feed.
+        """
+        self.logger.info("Navigating to LinkedIn login page...")
+        self.page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
 
-    def ai_click(self, instruction: str):
-        """
-        STUB for the next version of this agent: take a screenshot, ask the
-        vision model to locate an element matching `instruction` (e.g.
-        "the search icon in the top right"), and click it. Not implemented
-        yet -- requires a model/prompt that returns pixel coordinates, and
-        most local vision models need extra prompting or a grounding model
-        (e.g. a dedicated UI-grounding model) to do this reliably.
-        """
-        raise NotImplementedError(
-            "ai_click is a placeholder for the next iteration, where the AI "
-            "picks the target element instead of you specifying a selector."
+        self.pause_for_user(
+            "Please log in to LinkedIn manually in the browser window "
+            "(including any 2FA or security checkpoint), then press Enter "
+            "here to continue."
         )
 
-    # -- task runner -------------------------------------------------------
+        # Give LinkedIn's own /login -> /feed redirect a real window to
+        # finish, rather than checking page.url the instant you resume.
+        try:
+            self.page.wait_for_url("**/feed/**", timeout=8000)
+            self.logger.info(f"Confirmed on the LinkedIn feed ({self.page.url}) -- login successful.")
+        except Exception:
+            self.logger.warning(
+                f"Didn't detect /feed/ within the timeout; currently at "
+                f"{self.page.url}. Continuing anyway."
+            )
 
-    ACTIONS = {
-        "goto": lambda self, s: self.goto(s["url"]),
-        "wait": lambda self, s: self.wait(s.get("seconds", 1)),
-        "click": lambda self, s: self.click(s["selector"], s.get("timeout", 10000)),
-        "type": lambda self, s: self.type_text(s["selector"], s["text"], s.get("clear", True)),
-        "press": lambda self, s: self.press_key(s["key"]),
-        "search": lambda self, s: self.search(s["selector"], s["query"]),
-        "scroll": lambda self, s: self.scroll(s.get("pixels", 600)),
-        "new_tab": lambda self, s: self.new_tab(s.get("url")),
-        "switch_tab": lambda self, s: self.switch_tab(s["index"]),
-        "close_tab": lambda self, s: self.close_tab(s.get("index")),
-        "extract": lambda self, s: self.extract(s["selector"], s.get("save_as")),
-        "screenshot": lambda self, s: self.screenshot(s.get("name")),
-        "login_linkedin": lambda self, s: self.login_linkedin(),
-        "search_linkedin_jobs": lambda self, s: self.search_linkedin_jobs(s["query"]),
-        "pause_for_user": lambda self, s: self.pause_for_user(s.get("message", "Press Enter in this terminal to continue...")),
-    }
+    # -- go straight to the jobs search results ---------------------------
 
-    def run_task_list(self, steps: list):
-        for i, step in enumerate(steps):
-            action = step.get("action")
-            record = {"step": i, "action": action, "params": step, "status": "ok"}
+    def open_jobs_search(self, keywords: str = DEFAULT_KEYWORDS, url: str = None):
+        """
+        Navigates directly to a LinkedIn jobs search-results URL -- no
+        clicking through the search box or the Jobs tab. If `url` is
+        given, it's used as-is; otherwise one is built from `keywords`
+        using JOBS_SEARCH_URL_TEMPLATE.
+        """
+        target = url or JOBS_SEARCH_URL_TEMPLATE.format(keywords=quote(keywords))
+        self.logger.info(f"Navigating to jobs search: {target}")
+        self.page.goto(target, wait_until="domcontentloaded")
+        self.logger.info(f"Now at {self.page.url}")
 
+    # -- element-lookup helpers that try multiple fallback selectors -------
+
+    def _find_first(self, selectors, root=None):
+        """Return (element, selector) for the first selector (from a list)
+        that currently matches something -- no waiting, just an instant
+        check. `root` can be a page or an element handle (to search within
+        a single job card, for example). Returns (None, None) if nothing
+        matches right now."""
+        scope = root or self.page
+        for sel in selectors:
             try:
-                fn = self.ACTIONS.get(action)
-                if fn is None:
-                    raise ValueError(f"Unknown action: {action}")
-                result = fn(self, step)
-                if action == "extract":
-                    record["extracted"] = result
-            except Exception as e:
-                record["status"] = "error"
-                record["error"] = str(e)
+                el = scope.query_selector(sel)
+                if el:
+                    return el, sel
+            except Exception:
+                continue
+        return None, None
 
-            # always capture a screenshot + optional AI description after
-            # each step, even on failure, so you can see what happened
+    def _find_all_first(self, selectors, root=None):
+        """Like _find_first, but returns ALL elements for the first
+        selector that matches anything, plus that selector."""
+        scope = root or self.page
+        for sel in selectors:
             try:
-                shot_path = self.screenshot(f"step_{i}_{action}")
-                record["screenshot"] = shot_path
-                if self.use_ai:
-                    record["ai_description"] = analyze_screenshot_with_ai(shot_path)
+                els = scope.query_selector_all(sel)
+                if els:
+                    return els, sel
+            except Exception:
+                continue
+        return [], None
+
+    def _wait_for_first(self, selectors, timeout_each: int = 4000):
+        """Try waiting for each selector (in order) to become visible,
+        giving each one up to `timeout_each` ms. Returns (element,
+        selector) for whichever one shows up first, or (None, None) if
+        none of them ever appear."""
+        for sel in selectors:
+            try:
+                el = self.page.wait_for_selector(sel, timeout=timeout_each, state="visible")
+                if el:
+                    return el, sel
+            except Exception:
+                continue
+        return None, None
+
+    def _click_exact_text(self, text: str, timeout: int = 4000) -> bool:
+        """Click the first visible element whose whole (trimmed) text
+        content is exactly `text`. Returns True on success, False if no
+        such element ever became visible."""
+        try:
+            locator = self.page.get_by_text(text, exact=True).first
+            locator.wait_for(state="visible", timeout=timeout)
+            locator.click()
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _dedupe_repeated(text: str) -> str:
+        """LinkedIn sometimes renders the same label twice inside one
+        element (a visible copy plus an accessibility-only duplicate);
+        collapse an exact A+A repeat down to a single A."""
+        t = text.strip()
+        n = len(t)
+        if n > 0 and n % 2 == 0:
+            half = n // 2
+            if t[:half] == t[half:]:
+                return t[:half].strip()
+        return t
+
+    # -- job-results scraping (scroll + extract) ----------------------------
+
+    def _extract_job_info(self, card):
+        """
+        Return (title, company, location) for one job card. Tries known,
+        specific company-name selectors first (COMPANY_NAME_SELECTORS_WITHIN_CARD).
+        If none of those match -- e.g. this is the newer markup where class
+        names are random hashes that change between deploys -- falls back
+        to structural order: the first three <p> elements in a card are,
+        in order, the job title, the company name, and the location.
+        """
+        el, used_sel = self._find_first(COMPANY_NAME_SELECTORS_WITHIN_CARD, root=card)
+        if el:
+            company = self._dedupe_repeated(" ".join(el.inner_text().split()))
+            return None, company, None
+
+        paragraphs = card.query_selector_all("p")
+        texts = []
+        for p in paragraphs[:3]:
+            raw = " ".join(p.inner_text().split())
+            texts.append(self._dedupe_repeated(raw))
+        while len(texts) < 3:
+            texts.append("")
+        title, company, location = texts[0], texts[1], texts[2]
+        return title, company, location
+
+    def _current_first_card_id(self):
+        """Return an identifier for whatever job card is currently first
+        on the page (its data-job-id, or componentkey as a fallback), or
+        None if no card is present. Used to detect whether clicking 'Next'
+        actually moved us to a different page of results."""
+        cards, _ = self._find_all_first(JOB_CARD_SELECTORS)
+        if not cards:
+            return None
+        try:
+            return cards[0].get_attribute("data-job-id") or cards[0].get_attribute("componentkey")
+        except Exception:
+            return None
+
+    def _go_to_next_jobs_page(self) -> bool:
+        """
+        Click the pagination 'Next' button. Returns True if a click went
+        through, False if there's no next page (button not found, or
+        disabled).
+        """
+        btn, used_sel = self._find_first(NEXT_PAGE_BUTTON_SELECTORS)
+        if btn:
+            try:
+                if btn.get_attribute("disabled") is not None or btn.get_attribute("aria-disabled") == "true":
+                    return False
+            except Exception:
+                pass
+            try:
+                btn.scroll_into_view_if_needed()
+                btn.click()
+                time.sleep(1.5)
+                self.logger.debug(f"Clicked 'Next' via selector: {used_sel!r}")
+                return True
             except Exception as e:
-                record["screenshot_error"] = str(e)
+                self.logger.debug(f"Failed to click 'Next' button ({used_sel!r}): {e}")
+                return False
 
-            self.log.append(record)
-            print(f"[{i}] {action} -> {record['status']}")
+        # Fall back to matching on the button's visible text.
+        if self._click_exact_text("Next", timeout=3000):
+            time.sleep(1.5)
+            self.logger.debug("Clicked 'Next' via exact-text match.")
+            return True
 
-        self.save_results()
+        return False
 
-    def save_results(self):
-        out = {
-            "log": self.log,
-            "extracted": self.extracted,
-        }
-        results_path = self.output_dir / "results.json"
-        with open(results_path, "w") as f:
-            json.dump(out, f, indent=2)
-        print(f"\nSaved results to {results_path}")
+    def _scrape_current_page(self, output_path: Path, seen_companies: set, max_rounds: int = 40, pause: float = 1.2):
+        """
+        Scrolls the CURRENT page of job results to the bottom (LinkedIn
+        loads more listings lazily as you scroll), extracts the company
+        name from every newly-loaded card, and appends new/unique company
+        names to `output_path` as they're found. Stops once the number of
+        loaded cards stops growing for two scrolls in a row, or after
+        `max_rounds` scrolls -- whichever comes first.
+        """
+        processed = 0
 
+        self.logger.debug("Waiting for job cards to appear...")
+        _, found_sel = self._wait_for_first(JOB_CARD_SELECTORS, timeout_each=8000)
+        if not found_sel:
+            debug_path = Path("debug_page.html")
+            try:
+                debug_path.write_text(self.page.content(), encoding="utf-8")
+                debug_note = f"Saved the current page HTML to {debug_path.resolve()} for inspection."
+            except Exception as e:
+                debug_note = f"Also couldn't save debug HTML: {e}"
+            self.logger.warning(
+                f"No job cards appeared within the timeout at {self.page.url} -- "
+                f"LinkedIn's markup may have changed. {debug_note} Continuing anyway."
+            )
 
-# --------------------------------------------------------------------------
-# CLI entry point
-# --------------------------------------------------------------------------
+        last_count = -1
+        stable_rounds = 0
+
+        for round_num in range(1, max_rounds + 1):
+            cards, _ = self._find_all_first(JOB_CARD_SELECTORS)
+            count = len(cards)
+
+            new_cards = cards[processed:count]
+            new_companies = []
+            for card in new_cards:
+                _title, company, _location = self._extract_job_info(card)
+                if company and company not in seen_companies:
+                    seen_companies.add(company)
+                    new_companies.append(company)
+
+            if new_companies:
+                with open(output_path, "a", encoding="utf-8") as f:
+                    for c in new_companies:
+                        f.write(c + "\n")
+
+            if new_cards:
+                processed = count
+                self.logger.info(
+                    f"Round {round_num}: {count} card(s) loaded so far, "
+                    f"{len(new_companies)} new compan(ies) saved (total unique: {len(seen_companies)})"
+                )
+
+            if count == last_count:
+                stable_rounds += 1
+                if stable_rounds >= 2:
+                    self.logger.info(f"Job list stable at {count} card(s) -- reached the end of this page's results.")
+                    break
+            else:
+                stable_rounds = 0
+            last_count = count
+
+            self.scroll(1400)
+            time.sleep(pause)
+        else:
+            self.logger.info(f"Hit max_rounds={max_rounds} while scrolling this page -- stopping.")
+
+    def scrape_job_companies(
+        self,
+        output_file: str = "companies.txt",
+        max_rounds: int = 40,
+        max_pages: int = None,
+        pause: float = 1.2,
+    ):
+        """
+        Assumes you're on a jobs search-results page. For each page: scrolls
+        to the bottom to load every listing, extracts every company name,
+        and appends new/unique ones to `output_file` -- then clicks 'Next'
+        and repeats on the next page. Keeps going until there's no 'Next'
+        button (or it's disabled), the page stops actually changing (a
+        safety net in case 'Next' is present but non-functional), or
+        `max_pages` is reached (pass None for no limit).
+        """
+        output_path = Path(output_file)
+        output_path.write_text("", encoding="utf-8")  # start this run's file fresh
+        seen_companies = set()
+        prev_first_id = None
+        page_num = 1
+
+        while True:
+            self.logger.info(f"--- Scraping job results, page {page_num} ---")
+            self._scrape_current_page(output_path, seen_companies, max_rounds=max_rounds, pause=pause)
+
+            current_first_id = self._current_first_card_id()
+            if page_num > 1 and current_first_id is not None and current_first_id == prev_first_id:
+                self.logger.info(
+                    "This page's results look identical to the previous page -- "
+                    "stopping here to avoid looping."
+                )
+                break
+            prev_first_id = current_first_id
+
+            if max_pages and page_num >= max_pages:
+                self.logger.info(f"Reached max_pages={max_pages} -- stopping.")
+                break
+
+            if not self._go_to_next_jobs_page():
+                self.logger.info("No 'Next' button found (or it's disabled) -- reached the last page.")
+                break
+
+            page_num += 1
+
+        self.logger.info(
+            f"Done. Saved {len(seen_companies)} unique compan(ies) across {page_num} page(s) "
+            f"to {output_path.resolve()}"
+        )
+        return sorted(seen_companies)
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Run a fixed sequence of browser steps.")
-    parser.add_argument("--tasks", required=True, help="Path to a JSON task-list file.")
-    parser.add_argument("--output", default="./run_output", help="Output directory for logs/screenshots.")
-    parser.add_argument("--headless", action="store_true", help="Run browser headless (no visible window).")
-    parser.add_argument("--no-ai", action="store_true", help="Skip AI screenshot descriptions (no Ollama needed).")
+    parser = argparse.ArgumentParser(
+        description="Log into LinkedIn manually, go straight to a jobs search URL, and scrape company names to a text file."
+    )
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Not recommended -- you need a visible window to log in by hand.",
+    )
+    parser.add_argument(
+        "--channel", default=None,
+        help="Optional browser channel, e.g. 'chrome' to launch your installed Chrome instead of bundled Chromium.",
+    )
+    parser.add_argument("--verbose", action="store_true", help="Show DEBUG-level detail on the console.")
+    parser.add_argument(
+        "--output-file", default="companies.txt",
+        help="Where to save the extracted company names (default: companies.txt in the current directory).",
+    )
+    parser.add_argument(
+        "--max-scroll-rounds", type=int, default=40,
+        help="Safety cap on how many times to scroll while loading job results, per page (default: 40).",
+    )
+    parser.add_argument(
+        "--max-pages", type=int, default=None,
+        help="Safety cap on how many pages of results to walk through via 'Next' (default: no limit -- goes until the last page).",
+    )
+    parser.add_argument(
+        "--keywords", default=DEFAULT_KEYWORDS,
+        help=f"Keywords to search jobs for (default: {DEFAULT_KEYWORDS!r}). Ignored if --url is given.",
+    )
+    parser.add_argument(
+        "--url", default=None,
+        help="Full jobs search-results URL to use as-is, overriding --keywords.",
+    )
     args = parser.parse_args()
 
-    with open(args.tasks) as f:
-        steps = json.load(f)
-
-    agent = BrowserAgent(output_dir=args.output, headless=args.headless, use_ai=not args.no_ai)
-    agent.start()
+    agent = BrowserAgent(headless=args.headless, channel=args.channel, verbose=args.verbose)
     try:
-        agent.run_task_list(steps)
+        agent.start()
+        agent.login_linkedin()
+        agent.open_jobs_search(keywords=args.keywords, url=args.url)
+        agent.scrape_job_companies(
+            output_file=args.output_file,
+            max_rounds=args.max_scroll_rounds,
+            max_pages=args.max_pages,
+        )
+    except KeyboardInterrupt:
+        agent.logger.info("Interrupted by user.")
     finally:
         agent.close()
 
