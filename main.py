@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 browser_agent.py
 =================
@@ -42,13 +43,13 @@ me the relevant snippet.
 INSTALL
 -------
     pip install playwright
-    playwright install chromium
+    playwright install --with-deps chromium
 
 RUN
 ---
-    python browser_agent.py
-    python browser_agent.py --keywords "founder's office"
-    python browser_agent.py --url "https://www.linkedin.com/jobs/search/?keywords=founder%27s%20office&origin=SWITCH_SEARCH_VERTICAL"
+    python3 browser_agent.py
+    python3 browser_agent.py --keywords "founder's office"
+    python3 browser_agent.py --url "https://www.linkedin.com/jobs/search/?keywords=founder%27s%20office&origin=SWITCH_SEARCH_VERTICAL"
 """
 
 import argparse
@@ -140,7 +141,7 @@ class BrowserAgent:
         )
         self._playwright = sync_playwright().start()
 
-        launch_kwargs = {"headless": self.headless}
+        launch_kwargs = {"headless": self.headless, "args": ["--disable-ipv6"]}
         if self.channel:
             launch_kwargs["channel"] = self.channel
 
