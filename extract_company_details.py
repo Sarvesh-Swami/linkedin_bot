@@ -62,37 +62,26 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-
-# --------------------------------------------------------------------------
-# Login credentials
-# --------------------------------------------------------------------------
-# SECURITY NOTE: plaintext in source. See the module docstring above --
-# swap these for os.environ[...] lookups before sharing/committing this file.
-LINKEDIN_EMAIL = "sarveshswami107@gmail.com"
-LINKEDIN_PASSWORD = "Sarvi@987522580"
+from linkedin_login import (
+    login_or_restore, save_session, load_session,
+    DEFAULT_SESSION_FILE, EMAIL_INPUT_SELECTORS, PASSWORD_INPUT_SELECTORS,
+)
 
 
 # --------------------------------------------------------------------------
-# Login form selectors
+# Login credentials — loaded from .env via the shared linkedin_login module.
+# The constants below are kept for backward compatibility with any code
+# that still references them directly.
 # --------------------------------------------------------------------------
-# These target stable attributes (type / autocomplete) rather than the
-# auto-generated `id="«R77vvcjksop9h9j6»"`-style ids React assigns via
-# useId(), which change on every page load and can't be hardcoded.
-#
-# `:visible` matters here: LinkedIn's sign-in page can have more than one
-# DOM node matching these attributes at once (e.g. alternate/responsive
-# layouts, hidden helper elements for the Google/Apple SSO widgets), and
-# only one copy is ever actually on screen. Without `:visible`, a plain
-# query_selector-based lookup can grab a hidden duplicate and then hang
-# forever waiting for it to become visible.
-EMAIL_INPUT_SELECTORS = [
-    'input[autocomplete="username webauthn"]:visible',
-    'input[type="email"]:visible',
-]
-PASSWORD_INPUT_SELECTORS = [
-    'input[autocomplete="current-password"]:visible',
-    'input[type="password"]:visible',
-]
+import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+except ImportError:
+    pass
+
+LINKEDIN_EMAIL = os.environ.get("LINKEDIN_EMAIL", "")
+LINKEDIN_PASSWORD = os.environ.get("LINKEDIN_PASSWORD", "")
 
 # --------------------------------------------------------------------------
 # Search / navigation selectors
@@ -542,40 +531,13 @@ class BrowserAgent:
         self.logger.info("Submitted LinkedIn login form.")
         return True
 
-    def login_linkedin(self):
+    def login_linkedin(self, session_file: str = DEFAULT_SESSION_FILE):
         """
-        Navigates to the LinkedIn login page, auto-fills the email and
-        password fields, and clicks "Sign in". Then PAUSES so you can
-        manually solve any 2FA prompt / security checkpoint / CAPTCHA that
-        LinkedIn shows next. Once you resume, checks whether you actually
-        reached the feed.
+        Auto-login using credentials from .env, or restore a previously
+        saved session.  Only pauses if LinkedIn shows a 2FA / CAPTCHA
+        checkpoint that needs manual intervention.
         """
-        self.logger.info("Navigating to LinkedIn login page...")
-        self.page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
-
-        if not self._fill_login_credentials():
-            self.logger.warning(
-                "Auto-fill did not complete successfully; you can finish "
-                "logging in by hand in the browser window."
-            )
-
-        self.pause_for_user(
-            "If LinkedIn is showing a 2FA prompt, security checkpoint, or "
-            "CAPTCHA, solve it manually in the browser window now, then "
-            "press Enter here to continue. If you're already on the feed, "
-            "just press Enter."
-        )
-
-        # Give LinkedIn's own /login -> /feed redirect a real window to
-        # finish, rather than checking page.url the instant you resume.
-        try:
-            self.page.wait_for_url("**/feed/**", timeout=8000)
-            self.logger.info(f"Confirmed on the LinkedIn feed ({self.page.url}) -- login successful.")
-        except Exception:
-            self.logger.warning(
-                f"Didn't detect /feed/ within the timeout; currently at "
-                f"{self.page.url}. Continuing anyway."
-            )
+        login_or_restore(self.page, logger=self.logger, session_file=session_file)
 
     def pause_for_inspection(self, seconds: int = 0):
         """
@@ -1529,6 +1491,10 @@ def main():
         "--output", default="results.json",
         help="Path to write the extracted company details as JSON (default: results.json).",
     )
+    parser.add_argument(
+        "--session-file", default=DEFAULT_SESSION_FILE,
+        help="Path to the saved LinkedIn session file (default: session.json).",
+    )
     args = parser.parse_args()
 
     companies = load_companies_file(args.companies_file)
@@ -1536,7 +1502,7 @@ def main():
     agent = BrowserAgent(headless=args.headless, channel=args.channel, verbose=args.verbose)
     try:
         agent.start()
-        agent.login_linkedin()
+        agent.login_linkedin(session_file=getattr(args, 'session_file', DEFAULT_SESSION_FILE))
         results = agent.process_companies(companies, output_path=args.output)
 
         out_path = Path(args.output)

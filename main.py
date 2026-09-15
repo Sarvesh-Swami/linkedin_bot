@@ -61,6 +61,8 @@ from urllib.parse import quote
 
 from playwright.sync_api import sync_playwright
 
+from linkedin_login import login_or_restore, save_session, load_session, DEFAULT_SESSION_FILE
+
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
     logger = logging.getLogger("browser_agent")
@@ -165,42 +167,13 @@ class BrowserAgent:
 
     # -- login -----------------------------------------------------------
 
-    def pause_for_user(self, message: str = "Press Enter in this terminal to continue..."):
+    def login_linkedin(self, session_file: str = DEFAULT_SESSION_FILE):
         """
-        Blocks the script and waits for you to press Enter in the terminal.
-        Solve any login form / 2FA / security checkpoint / CAPTCHA by hand
-        in the visible browser window, then come back here and press Enter.
-        This script does not attempt to solve or bypass any of those itself.
+        Auto-login using credentials from .env, or restore a previously
+        saved session.  Only pauses if LinkedIn shows a 2FA / CAPTCHA
+        checkpoint that needs manual intervention.
         """
-        self.logger.info(f"PAUSED: {message}")
-        input(f"\n[PAUSED] {message}\n")
-        self.logger.info("Resumed by user.")
-
-    def login_linkedin(self):
-        """
-        Navigates to the LinkedIn login page and then PAUSES so you can log
-        in yourself in the visible browser window. Once you resume, checks
-        whether you actually reached the feed.
-        """
-        self.logger.info("Navigating to LinkedIn login page...")
-        self.page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
-
-        self.pause_for_user(
-            "Please log in to LinkedIn manually in the browser window "
-            "(including any 2FA or security checkpoint), then press Enter "
-            "here to continue."
-        )
-
-        # Give LinkedIn's own /login -> /feed redirect a real window to
-        # finish, rather than checking page.url the instant you resume.
-        try:
-            self.page.wait_for_url("**/feed/**", timeout=8000)
-            self.logger.info(f"Confirmed on the LinkedIn feed ({self.page.url}) -- login successful.")
-        except Exception:
-            self.logger.warning(
-                f"Didn't detect /feed/ within the timeout; currently at "
-                f"{self.page.url}. Continuing anyway."
-            )
+        login_or_restore(self.page, logger=self.logger, session_file=session_file)
 
     # -- go straight to the jobs search results ---------------------------
 
@@ -507,12 +480,18 @@ def main():
         "--url", default=None,
         help="Full jobs search-results URL to use as-is, overriding --keywords.",
     )
+    parser.add_argument(
+        "--session-file", default=DEFAULT_SESSION_FILE,
+        help="Path to the saved LinkedIn session file (default: session.json).",
+    )
     args = parser.parse_args()
+
+    session_file = getattr(args, 'session_file', DEFAULT_SESSION_FILE)
 
     agent = BrowserAgent(headless=args.headless, channel=args.channel, verbose=args.verbose)
     try:
         agent.start()
-        agent.login_linkedin()
+        agent.login_linkedin(session_file=session_file)
         agent.open_jobs_search(keywords=args.keywords, url=args.url)
         agent.scrape_job_companies(
             output_file=args.output_file,

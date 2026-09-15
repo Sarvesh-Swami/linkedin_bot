@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LinkedIn Bot — Pipeline Dashboard</title>
+    <meta name="description" content="Pipeline dashboard for orchestrating LinkedIn scraping scripts">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- ===== HEADER ===== -->
+    <header class="header">
+        <div class="header__brand">
+            <div class="header__icon">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                </svg>
+            </div>
+            <div>
+                <h1 class="header__title">LinkedIn Bot Pipeline</h1>
+                <p class="header__subtitle">Automated company & people scraping</p>
+            </div>
+        </div>
+        <div class="header__status">
+            <span class="status-badge" id="globalStatus" data-status="idle">
+                <span class="status-badge__dot"></span>
+                <span class="status-badge__text">Idle</span>
+            </span>
+            <span class="header__time" id="elapsedTime"></span>
+        </div>
+    </header>
+
+    <main class="main">
+        <!-- ===== CONFIG PANEL ===== -->
+        <section class="config-panel glass" id="configPanel">
+            <div class="config-panel__header">
+                <h2 class="section-title">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M12 1v6m0 6v6m8.66-13l-5.2 3m-6.92 4l-5.2 3M22.66 17l-5.2-3M8.54 10l-5.2-3"></path>
+                    </svg>
+                    Pipeline Configuration
+                </h2>
+                <div class="config-panel__actions">
+                    <button class="btn btn--primary btn--lg" id="btnRun" onclick="startPipeline()">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                        Run Pipeline
+                    </button>
+                    <button class="btn btn--danger" id="btnStop" onclick="stopPipeline()" disabled>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"></rect></svg>
+                        Stop
+                    </button>
+                </div>
+            </div>
+            <div class="config-panel__fields">
+                <div class="field">
+                    <label class="field__label" for="keywords">Job Search Keywords</label>
+                    <input class="field__input" type="text" id="keywords" placeholder="founder's office" value="founder's office">
+                </div>
+                <div class="field">
+                    <label class="field__label" for="searchUrl">OR Custom Search URL</label>
+                    <input class="field__input" type="url" id="searchUrl" placeholder="https://www.linkedin.com/jobs/search/?keywords=...">
+                </div>
+                <div class="field field--half">
+                    <label class="field__label" for="maxPages">Max Pages</label>
+                    <input class="field__input" type="number" id="maxPages" placeholder="No limit" min="1">
+                </div>
+                <div class="field field--half">
+                    <label class="field__label" for="maxScroll">Max Scroll Rounds</label>
+                    <input class="field__input" type="number" id="maxScroll" placeholder="40" min="1" value="40">
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== PIPELINE STEPS ===== -->
+        <section class="steps-section">
+            <h2 class="section-title">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line>
+                    <line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>
+                </svg>
+                Pipeline Steps
+            </h2>
+            <div class="steps-track">
+                <div class="step-card glass" id="step-0" data-status="pending" onclick="showStepLogs(0)">
+                    <div class="step-card__number">1</div>
+                    <div class="step-card__icon" id="stepIcon-0">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg>
+                    </div>
+                    <h3 class="step-card__title">Job Scraper</h3>
+                    <p class="step-card__desc">Search LinkedIn jobs → company names</p>
+                    <div class="step-card__output">
+                        <span class="step-card__file">companies.txt</span>
+                        <span class="step-card__badge badge--login">Manual Login</span>
+                    </div>
+                </div>
+
+                <div class="step-connector">
+                    <div class="step-connector__line"></div>
+                    <svg class="step-connector__arrow" width="12" height="12" viewBox="0 0 12 12"><path d="M2 6h8M7 3l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                </div>
+
+                <div class="step-card glass" id="step-1" data-status="pending" onclick="showStepLogs(1)">
+                    <div class="step-card__number">2</div>
+                    <div class="step-card__icon" id="stepIcon-1">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg>
+                    </div>
+                    <h3 class="step-card__title">Company Details</h3>
+                    <p class="step-card__desc">Visit About pages → extract info</p>
+                    <div class="step-card__output">
+                        <span class="step-card__file">results.json</span>
+                        <span class="step-card__badge badge--login">Manual Login</span>
+                    </div>
+                </div>
+
+                <div class="step-connector">
+                    <div class="step-connector__line"></div>
+                    <svg class="step-connector__arrow" width="12" height="12" viewBox="0 0 12 12"><path d="M2 6h8M7 3l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                </div>
+
+                <div class="step-card glass" id="step-2" data-status="pending" onclick="showStepLogs(2)">
+                    <div class="step-card__number">3</div>
+                    <div class="step-card__icon" id="stepIcon-2">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg>
+                    </div>
+                    <h3 class="step-card__title">JSON Parser</h3>
+                    <p class="step-card__desc">Clean raw data → structured records</p>
+                    <div class="step-card__output">
+                        <span class="step-card__file">clean_data.json</span>
+                        <span class="step-card__badge badge--auto">Automatic</span>
+                    </div>
+                </div>
+
+                <div class="step-connector">
+                    <div class="step-connector__line"></div>
+                    <svg class="step-connector__arrow" width="12" height="12" viewBox="0 0 12 12"><path d="M2 6h8M7 3l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                </div>
+
+                <div class="step-card glass" id="step-3" data-status="pending" onclick="showStepLogs(3)">
+                    <div class="step-card__number">4</div>
+                    <div class="step-card__icon" id="stepIcon-3">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg>
+                    </div>
+                    <h3 class="step-card__title">People Scraper</h3>
+                    <p class="step-card__desc">Visit People pages → profile URLs</p>
+                    <div class="step-card__output">
+                        <span class="step-card__file">people.json</span>
+                        <span class="step-card__badge badge--login">Manual Login</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== PAUSED BANNER ===== -->
+        <section class="pause-banner glass" id="pauseBanner" style="display: none;">
+            <div class="pause-banner__content">
+                <div class="pause-banner__pulse"></div>
+                <div>
+                    <h3 class="pause-banner__title">⏸ Waiting for Manual Input</h3>
+                    <p class="pause-banner__message" id="pauseMessage">
+                        Complete the login / 2FA in the browser window, then click "Resume" below.
+                    </p>
+                </div>
+            </div>
+            <button class="btn btn--accent btn--lg" onclick="sendInput()">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                Resume (Send Enter)
+            </button>
+        </section>
+
+        <!-- ===== LOG VIEWER ===== -->
+        <section class="log-section glass">
+            <div class="log-section__header">
+                <h2 class="section-title">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line>
+                    </svg>
+                    Live Output
+                </h2>
+                <div class="log-section__tabs" id="logTabs">
+                    <button class="log-tab active" data-step="all" onclick="switchLogTab('all')">All Steps</button>
+                    <button class="log-tab" data-step="0" onclick="switchLogTab(0)">
+                        <span class="log-tab__dot" data-step="0"></span>Step 1
+                    </button>
+                    <button class="log-tab" data-step="1" onclick="switchLogTab(1)">
+                        <span class="log-tab__dot" data-step="1"></span>Step 2
+                    </button>
+                    <button class="log-tab" data-step="2" onclick="switchLogTab(2)">
+                        <span class="log-tab__dot" data-step="2"></span>Step 3
+                    </button>
+                    <button class="log-tab" data-step="3" onclick="switchLogTab(3)">
+                        <span class="log-tab__dot" data-step="3"></span>Step 4
+                    </button>
+                </div>
+            </div>
+            <div class="log-viewer" id="logViewer">
+                <div class="log-viewer__empty" id="logEmpty">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.3">
+                        <polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line>
+                    </svg>
+                    <p>Pipeline output will appear here once started...</p>
+                </div>
+                <div class="log-viewer__lines" id="logLines"></div>
+            </div>
+        </section>
+
+        <!-- ===== RESULTS SUMMARY ===== -->
+        <section class="results-section glass" id="resultsSection" style="display: none;">
+            <h2 class="section-title">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>
+                </svg>
+                Results Summary
+            </h2>
+            <div class="results-grid">
+                <div class="result-card">
+                    <div class="result-card__value" id="resCompanies">—</div>
+                    <div class="result-card__label">Companies Found</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-card__value" id="resDetails">—</div>
+                    <div class="result-card__label">Details Extracted</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-card__value" id="resFailed">—</div>
+                    <div class="result-card__label">Failed Scrapes</div>
+                </div>
+                <div class="result-card">
+                    <div class="result-card__value" id="resProfiles">—</div>
+                    <div class="result-card__label">Profile URLs</div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+    // =====================================================================
+    // State
+    // =====================================================================
+    let currentLogTab = 'all';
+    let allLogs = [];            // {step, time, text, stream}
+    let stepLogs = [[], [], [], []];
+    let eventSource = null;
+    let startedAt = null;
+    let elapsedInterval = null;
+
+    // =====================================================================
+    // SSE connection
+    // =====================================================================
+    function connectSSE() {
+        if (eventSource) eventSource.close();
+        eventSource = new EventSource('/api/stream');
+
+        eventSource.addEventListener('init', (e) => {
+            const state = JSON.parse(e.data);
+            applyFullState(state);
+        });
+
+        eventSource.addEventListener('log', (e) => {
+            const data = JSON.parse(e.data);
+            addLogLine(data);
+        });
+
+        eventSource.addEventListener('step_update', (e) => {
+            const data = JSON.parse(e.data);
+            updateStepCard(data.step, data.status, data.message);
+        });
+
+        eventSource.addEventListener('pipeline_update', (e) => {
+            const data = JSON.parse(e.data);
+            updateGlobalStatus(data.status);
+            if (data.status === 'completed' || data.status === 'failed' || data.status === 'stopped') {
+                fetchResults();
+                stopElapsedTimer();
+            }
+        });
+
+        eventSource.onerror = () => {
+            setTimeout(connectSSE, 3000);
+        };
+    }
+
+    // =====================================================================
+    // Pipeline controls
+    // =====================================================================
+    function startPipeline() {
+        const config = {
+            keywords: document.getElementById('keywords').value,
+            url: document.getElementById('searchUrl').value,
+            max_pages: document.getElementById('maxPages').value || null,
+            max_scroll_rounds: document.getElementById('maxScroll').value || null,
+        };
+
+        // Reset UI
+        allLogs = [];
+        stepLogs = [[], [], [], []];
+        document.getElementById('logLines').innerHTML = '';
+        document.getElementById('logEmpty').style.display = 'flex';
+        document.getElementById('resultsSection').style.display = 'none';
+        document.getElementById('pauseBanner').style.display = 'none';
+
+        for (let i = 0; i < 4; i++) {
+            updateStepCard(i, 'pending');
+        }
+
+        fetch('/api/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(config),
+        }).then(r => r.json()).then(data => {
+            if (data.ok) {
+                updateGlobalStatus('running');
+                document.getElementById('btnRun').disabled = true;
+                document.getElementById('btnStop').disabled = false;
+                startElapsedTimer();
+            }
+        });
+    }
+
+    function stopPipeline() {
+        fetch('/api/stop', {method: 'POST'}).then(r => r.json()).then(() => {
+            updateGlobalStatus('stopped');
+        });
+    }
+
+    function sendInput() {
+        fetch('/api/send-input', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({text: '\n'}),
+        });
+    }
+
+    // =====================================================================
+    // UI updates
+    // =====================================================================
+
+    const STATUS_META = {
+        idle:      { label: 'Idle',        class: 'idle' },
+        running:   { label: 'Running',     class: 'running' },
+        paused:    { label: 'Waiting',     class: 'paused' },
+        completed: { label: 'Completed',   class: 'completed' },
+        failed:    { label: 'Failed',      class: 'failed' },
+        stopped:   { label: 'Stopped',     class: 'stopped' },
+        pending:   { label: 'Pending',     class: 'pending' },
+        skipped:   { label: 'Skipped',     class: 'skipped' },
+    };
+
+    function updateGlobalStatus(status) {
+        const el = document.getElementById('globalStatus');
+        const meta = STATUS_META[status] || STATUS_META.idle;
+        el.dataset.status = status;
+        el.querySelector('.status-badge__text').textContent = meta.label;
+
+        const btnRun = document.getElementById('btnRun');
+        const btnStop = document.getElementById('btnStop');
+        const configFields = document.querySelectorAll('.field__input');
+
+        if (status === 'running' || status === 'paused') {
+            btnRun.disabled = true;
+            btnStop.disabled = false;
+            configFields.forEach(f => f.disabled = true);
+        } else {
+            btnRun.disabled = false;
+            btnStop.disabled = true;
+            configFields.forEach(f => f.disabled = false);
+        }
+
+        // Pause banner
+        document.getElementById('pauseBanner').style.display = status === 'paused' ? 'flex' : 'none';
+    }
+
+    const STEP_ICONS = {
+        pending:   '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.4"><circle cx="12" cy="12" r="10"></circle></svg>',
+        running:   '<div class="spinner"></div>',
+        paused:    '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--clr-warning)" stroke-width="2"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>',
+        completed: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--clr-success)" stroke-width="2.5"><path d="M20 6L9 17l-5-5"></path></svg>',
+        failed:    '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--clr-danger)" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>',
+        skipped:   '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.25"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>',
+        stopped:   '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--clr-danger)" stroke-width="2.5"><rect x="6" y="6" width="12" height="12" rx="1"></rect></svg>',
+    };
+
+    function updateStepCard(step, status, message) {
+        const card = document.getElementById(`step-${step}`);
+        if (!card) return;
+        card.dataset.status = status;
+        document.getElementById(`stepIcon-${step}`).innerHTML = STEP_ICONS[status] || STEP_ICONS.pending;
+
+        // Update tab dot
+        const dot = document.querySelector(`.log-tab__dot[data-step="${step}"]`);
+        if (dot) dot.dataset.status = status;
+
+        // If paused, update pause banner message
+        if (status === 'paused' && message) {
+            document.getElementById('pauseMessage').textContent = message;
+        }
+    }
+
+    function addLogLine(data) {
+        document.getElementById('logEmpty').style.display = 'none';
+
+        const entry = {
+            step: data.step,
+            step_id: data.step_id,
+            time: data.time,
+            text: data.text,
+            stream: data.stream,
+        };
+
+        allLogs.push(entry);
+        if (data.step >= 0 && data.step < 4) {
+            stepLogs[data.step].push(entry);
+        }
+
+        // Only render if the active tab matches
+        if (currentLogTab === 'all' || currentLogTab === data.step) {
+            renderLogEntry(entry);
+        }
+    }
+
+    function renderLogEntry(entry) {
+        const container = document.getElementById('logLines');
+        const line = document.createElement('div');
+        line.className = `log-line log-line--${entry.stream}`;
+
+        const stepColors = ['var(--clr-step-1)', 'var(--clr-step-2)', 'var(--clr-step-3)', 'var(--clr-step-4)'];
+        const stepColor = stepColors[entry.step] || 'var(--clr-text-muted)';
+
+        line.innerHTML = `<span class="log-line__time">${entry.time}</span><span class="log-line__step" style="color:${stepColor}">S${entry.step + 1}</span><span class="log-line__text">${escapeHtml(entry.text)}</span>`;
+
+        container.appendChild(line);
+
+        // Auto-scroll
+        const viewer = document.getElementById('logViewer');
+        const isNearBottom = viewer.scrollHeight - viewer.scrollTop - viewer.clientHeight < 120;
+        if (isNearBottom) {
+            viewer.scrollTop = viewer.scrollHeight;
+        }
+    }
+
+    function switchLogTab(tab) {
+        currentLogTab = tab;
+        document.querySelectorAll('.log-tab').forEach(t => {
+            t.classList.toggle('active', t.dataset.step === String(tab));
+        });
+
+        const container = document.getElementById('logLines');
+        container.innerHTML = '';
+
+        const logs = tab === 'all' ? allLogs : (stepLogs[tab] || []);
+        const empty = document.getElementById('logEmpty');
+        empty.style.display = logs.length === 0 ? 'flex' : 'none';
+
+        logs.forEach(entry => renderLogEntry(entry));
+
+        // Scroll to bottom
+        const viewer = document.getElementById('logViewer');
+        viewer.scrollTop = viewer.scrollHeight;
+    }
+
+    function showStepLogs(step) {
+        switchLogTab(step);
+    }
+
+    // =====================================================================
+    // Results
+    // =====================================================================
+    function fetchResults() {
+        fetch('/api/results').then(r => r.json()).then(data => {
+            const section = document.getElementById('resultsSection');
+
+            const hasAny = data.companies || data.clean_data || data.people;
+            if (!hasAny) return;
+
+            section.style.display = 'block';
+
+            document.getElementById('resCompanies').textContent =
+                data.companies ? data.companies.count : '—';
+            document.getElementById('resDetails').textContent =
+                data.clean_data ? data.clean_data.count : '—';
+            document.getElementById('resFailed').textContent =
+                data.failed ? data.failed.count : '0';
+            document.getElementById('resProfiles').textContent =
+                data.people ? data.people.total_profiles : '—';
+        });
+    }
+
+    // =====================================================================
+    // Elapsed timer
+    // =====================================================================
+    function startElapsedTimer() {
+        startedAt = Date.now();
+        if (elapsedInterval) clearInterval(elapsedInterval);
+        elapsedInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+            const m = Math.floor(elapsed / 60);
+            const s = elapsed % 60;
+            document.getElementById('elapsedTime').textContent =
+                `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+        }, 1000);
+    }
+
+    function stopElapsedTimer() {
+        if (elapsedInterval) {
+            clearInterval(elapsedInterval);
+            elapsedInterval = null;
+        }
+    }
+
+    // =====================================================================
+    // Helpers
+    // =====================================================================
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function applyFullState(state) {
+        updateGlobalStatus(state.status);
+        state.steps.forEach((s, i) => updateStepCard(i, s.status));
+        if (state.status === 'running' || state.status === 'paused') {
+            document.getElementById('btnRun').disabled = true;
+            document.getElementById('btnStop').disabled = false;
+            startElapsedTimer();
+        }
+    }
+
+    // =====================================================================
+    // Init
+    // =====================================================================
+    connectSSE();
+    </script>
+</body>
+</html>
