@@ -1,0 +1,52 @@
+# ==========================================================================
+# SECRETS + PER-DEVICE STATE  -- never commit, never share
+# ==========================================================================
+# Your own LinkedIn credentials (copy .env.example -> .env on each machine)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Saved browser session (live LinkedIn cookies for YOUR account).
+# It is written by linkedin_login.py on first login and reused on this
+# device only -- anyone else's copy is detected and discarded at run time.
+session.json
+session*.json
+sessions/
+browser_profile/
+linkedin_state/
+
+# ==========================================================================
+# GENERATED RUN OUTPUT
+# ==========================================================================
+companies.txt
+results.json
+results_failed.json
+clean_data.json
+people.json
+email_results.json
+debug_page.html
+run_output/
+*.log
+
+# ==========================================================================
+# PYTHON
+# ==========================================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+
+# ==========================================================================
+# NODE / EDITORS / OS
+# ==========================================================================
+node_modules/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

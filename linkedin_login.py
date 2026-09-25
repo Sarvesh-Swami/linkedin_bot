@@ -9,6 +9,30 @@ Shared login helper used by all pipeline scripts.
 - Saves browser session state (cookies + localStorage) to a JSON file
   so later pipeline steps can skip login entirely
 - Loads a previously saved session to restore login state
+- CHECKS THAT A SAVED SESSION IS YOURS before reusing it, so a session
+  file that came from someone else's machine/account can never silently
+  sign you into their LinkedIn account.
+
+SESSION OWNERSHIP
+-----------------
+Every session file written by this module carries an extra `bot_meta`
+block alongside Playwright's `cookies` / `origins`:
+
+    "bot_meta": {
+        "saved_by_email": "you@example.com",   # LINKEDIN_EMAIL at save time
+        "machine":        "YOUR-PC",           # socket.gethostname()
+        "saved_at":       "2026-09-25T18:00:00",
+        "logged_in_as":   "your-profile-handle"   # from linkedin.com/in/<handle>/
+    }
+
+A saved session is only reused when that block matches *this* machine and
+*this* .env account. A session file with no `bot_meta` at all (for example
+one that was committed to a public repo) is treated as foreign, deleted,
+and replaced by a fresh login. `session.json` is gitignored -- it holds
+live cookies and is strictly per-device; never commit or share it.
+
+Set LINKEDIN_ACCOUNT (your profile handle or /in/ URL) in .env to also
+assert *which* account a restored session must belong to.
 
 USAGE (from any script):
     from linkedin_login import load_env_credentials, auto_login, save_session, load_session
@@ -16,7 +40,10 @@ USAGE (from any script):
 
 import os
 import json
+import re
+import socket
 import time
+from datetime import datetime
 from pathlib import Path
 
 # Try to load .env automatically; if python-dotenv isn't installed,
@@ -63,6 +90,202 @@ def load_env_credentials():
     email = os.environ.get("LINKEDIN_EMAIL")
     password = os.environ.get("LINKEDIN_PASSWORD")
     return email, password
+
+
+# --------------------------------------------------------------------------
+# Session ownership  (who does a saved session.json belong to?)
+# --------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    """Current local time as an ISO-8601 string (seconds precision)."""
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _normalise_handle(value):
+    """
+    Reduce a profile URL, a bare handle, or None to a comparable lowercase
+    handle, e.g. 'https://www.linkedin.com/in/Yash-Shah/' -> 'yash-shah'.
+    Returns None if there is nothing usable.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    match = re.search(r"/in/([^/?#]+)", text)
+    if match:
+        text = match.group(1)
+    text = text.strip("/ \t\r\n")
+    return text or None
+
+
+def read_session_meta(session_file: str = DEFAULT_SESSION_FILE):
+    """Return the `bot_meta` ownership block of a saved session, or None."""
+    path = Path(session_file)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    meta = data.get("bot_meta")
+    return meta if isinstance(meta, dict) else None
+
+
+def session_belongs_to_this_user(session_file: str = DEFAULT_SESSION_FILE, logger=None) -> bool:
+    """
+    Decide whether an existing session file may be reused ON THIS MACHINE.
+
+    Returns False (the caller must then log in fresh) when:
+      * the file has no `bot_meta` block -- i.e. it was written by an older
+        version, or downloaded/copied from somebody else, or
+      * it was saved with a different LINKEDIN_EMAIL than the .env on this
+        machine, or
+      * it was saved on a different machine (hostname mismatch).
+
+    Set LINKEDIN_ALLOW_FOREIGN_SESSION=1 to bypass this check (only useful if
+    you deliberately copy your own session between your own devices).
+    """
+    if str(os.environ.get("LINKEDIN_ALLOW_FOREIGN_SESSION", "")).strip().lower() in {"1", "true", "yes"}:
+        if logger:
+            logger.warning(
+                "LINKEDIN_ALLOW_FOREIGN_SESSION is set -- skipping the session "
+                "ownership check (use only for your own sessions)."
+            )
+        return True
+
+    meta = read_session_meta(session_file)
+    if not meta:
+        if logger:
+            logger.warning(
+                f"{session_file} has no ownership record (bot_meta) -- treating it as a "
+                "session copied from another machine/account."
+            )
+        return False
+
+    saved_email = str(meta.get("saved_by_email") or "").strip().lower()
+    current_email = str(load_env_credentials()[0] or "").strip().lower()
+    if saved_email and current_email and saved_email != current_email:
+        if logger:
+            logger.warning(
+                f"{session_file} was saved for {saved_email} but .env says {current_email} "
+                "-- refusing to reuse it."
+            )
+        return False
+
+    saved_machine = str(meta.get("machine") or "").strip().lower()
+    this_machine = socket.gethostname().strip().lower()
+    if saved_machine and saved_machine != this_machine:
+        if logger:
+            logger.warning(
+                f"{session_file} was created on machine {saved_machine!r} (this is "
+                f"{this_machine!r}) -- refusing to reuse it."
+            )
+        return False
+
+    return True
+
+
+def expected_account_handle(logger=None):
+    """
+    The profile handle a restored session must belong to, from the optional
+    LINKEDIN_ACCOUNT env var (a handle or a full /in/ URL). None if unset.
+    """
+    raw = str(os.environ.get("LINKEDIN_ACCOUNT") or "").strip()
+    if not raw:
+        return None
+    if "@" in raw and "/in/" not in raw:
+        if logger:
+            logger.info(
+                "LINKEDIN_ACCOUNT looks like an email address -- it must be your "
+                "LinkedIn profile handle or /in/ URL. Ignoring it."
+            )
+        return None
+    return _normalise_handle(raw)
+
+
+def get_logged_in_handle(page, logger=None):
+    """
+    Best-effort lookup of the LinkedIn profile handle (/in/<handle>) of the
+    account CURRENTLY signed in. Returns None when it can't be determined --
+    callers should treat None as "unknown", not as "wrong account".
+    """
+    # 1) Cheapest: read the link straight out of the global nav of the page we
+    #    are already on (no extra navigation needed). The "Me" menu container
+    #    is checked first because it is guaranteed to be the signed-in member.
+    try:
+        handle = page.evaluate(
+            """() => {
+                const scopes = [
+                    '.global-nav__me',
+                    '[class*="global-nav__me"]',
+                    'header',
+                    'nav',
+                    '[class*="global-nav"]'
+                ];
+                for (const sel of scopes) {
+                    for (const scope of document.querySelectorAll(sel)) {
+                        for (const a of scope.querySelectorAll('a[href*="/in/"]')) {
+                            const m = (a.getAttribute('href') || '').match(/\\/in\\/([^\\/?#]+)/);
+                            if (m && m[1] && m[1] !== 'me') return decodeURIComponent(m[1]);
+                        }
+                    }
+                }
+                return null;
+            }"""
+        )
+        handle = _normalise_handle(handle)
+        if handle:
+            return handle
+    except Exception:
+        pass
+
+    # 2) Fallback: /in/me/ redirects to the signed-in member's own profile.
+    try:
+        page.goto("https://www.linkedin.com/in/me/", wait_until="domcontentloaded", timeout=20000)
+        handle = _normalise_handle(page.url)
+        if handle and handle != "me":
+            return handle
+    except Exception as e:
+        if logger:
+            logger.info(f"Could not determine the signed-in profile handle: {e}")
+
+    return None
+
+
+def _session_account_matches(page, session_file: str = DEFAULT_SESSION_FILE, logger=None) -> bool:
+    """
+    Confirm that the account a just-restored session is signed in as is the
+    account that session (and LINKEDIN_ACCOUNT, if set) claims. Returns False
+    only when we positively read a DIFFERENT handle.
+    """
+    expected_from_env = expected_account_handle(logger)
+    meta = read_session_meta(session_file) or {}
+    expected_from_file = _normalise_handle(meta.get("logged_in_as"))
+
+    if not expected_from_env and not expected_from_file:
+        return True  # nothing to compare against
+
+    actual = get_logged_in_handle(page, logger)
+    if not actual:
+        if logger:
+            logger.info("Could not read the signed-in profile handle -- skipping the account check.")
+        return True
+
+    if logger:
+        logger.info(f"Signed in as LinkedIn profile handle {actual!r}.")
+
+    for label, wanted in (("LINKEDIN_ACCOUNT", expected_from_env),
+                          ("the saved session file", expected_from_file)):
+        if wanted and wanted != actual:
+            if logger:
+                logger.warning(
+                    f"{label} says this session belongs to {wanted!r}, but LinkedIn is "
+                    f"signed in as {actual!r}."
+                )
+            return False
+
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -122,6 +345,20 @@ def _fill_login_form(page, email: str, password: str, logger=None) -> bool:
     return True
 
 
+def _has_auth_cookie(page) -> bool:
+    """
+    True if the browser context currently holds a LinkedIn auth cookie.
+    `li_at` is the real auth cookie; `li_rm` is the "remember me" cookie
+    LinkedIn uses to re-establish `li_at`. Either one means a login landed.
+    """
+    try:
+        context = page if hasattr(page, "cookies") else page.context
+        names = {c.get("name") for c in context.cookies() if c.get("value")}
+    except Exception:
+        return False
+    return bool(names & {"li_at", "li_rm"})
+
+
 def _is_on_feed(page) -> bool:
     """Check if the browser is currently on the LinkedIn feed."""
     url = page.url.lower()
@@ -148,28 +385,34 @@ def auto_login(page, logger=None, session_file: str = DEFAULT_SESSION_FILE):
     """
     Full auto-login flow:
       1. Navigate to LinkedIn login
-      2. Fill credentials from .env
-      3. Submit and wait for feed
+      2. Fill credentials from .env (or pause for a purely manual login if
+         there is no .env on this machine)
+      3. Submit and wait for the feed / auth cookies
       4. If 2FA/CAPTCHA appears, pause for manual intervention
-      5. Save session on success
+      5. Save the session on success
 
-    Returns True if login succeeded (reached the feed).
+    Returns True if login succeeded (landed on the feed or got an auth cookie).
     """
     email, password = load_env_credentials()
-    if not email or not password:
-        if logger:
-            logger.error(
-                "LINKEDIN_EMAIL / LINKEDIN_PASSWORD not found in environment. "
-                "Check that your .env file exists."
-            )
-        return False
 
     if logger:
         logger.info("Navigating to LinkedIn login page...")
     page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
 
-    # Fill and submit
-    if not _fill_login_form(page, email, password, logger):
+    if not email or not password:
+        # No credentials on this machine (e.g. a fresh clone with no .env):
+        # don't fail -- just let whoever is at the keyboard sign in.
+        if logger:
+            logger.warning(
+                "LINKEDIN_EMAIL / LINKEDIN_PASSWORD not found in the environment. "
+                "Copy .env.example to .env and add your own LinkedIn account to have "
+                "the form filled in automatically, or just log in by hand now."
+            )
+        input(
+            "\n[PAUSED] No credentials in .env -- log into LinkedIn by hand in the "
+            "browser window, then press Enter here to continue.\n"
+        )
+    elif not _fill_login_form(page, email, password, logger):
         if logger:
             logger.warning(
                 "Auto-fill did not complete. Falling back to manual pause."
@@ -180,10 +423,10 @@ def auto_login(page, logger=None, session_file: str = DEFAULT_SESSION_FILE):
     if logger:
         logger.info("Waiting for LinkedIn to finish login redirect...")
 
-    # Give LinkedIn up to 15 seconds to redirect to the feed
+    # Give LinkedIn up to 15 seconds to redirect to the feed / set auth cookies
     for _ in range(30):
         time.sleep(0.5)
-        if _is_on_feed(page):
+        if _is_on_feed(page) or _has_auth_cookie(page):
             break
         if _needs_manual_intervention(page):
             if logger:
@@ -201,36 +444,78 @@ def auto_login(page, logger=None, session_file: str = DEFAULT_SESSION_FILE):
                 pass
             break
 
-    if _is_on_feed(page):
+    if _is_on_feed(page) or _has_auth_cookie(page):
         if logger:
-            logger.info(f"Login successful — on the feed ({page.url}).")
+            logger.info(f"Login successful ({page.url}).")
         save_session(page, session_file, logger)
         return True
-    else:
-        if logger:
-            logger.warning(
-                f"Did not land on the feed (currently at {page.url}). "
-                "Continuing anyway — some pages may still work."
-            )
-        # Still save whatever session state we have
-        save_session(page, session_file, logger)
-        return False
+
+    if logger:
+        logger.warning(
+            f"Did not land on the feed (currently at {page.url}). "
+            "Continuing anyway -- some pages may still work."
+        )
+    # Do NOT save a session file here: an unauthenticated state is not worth
+    # persisting, and writing it would make the next run "restore" nothing.
+    return False
 
 
 # --------------------------------------------------------------------------
 # Session persistence
 # --------------------------------------------------------------------------
 
-def save_session(page, session_file: str = DEFAULT_SESSION_FILE, logger=None):
-    """Save the browser context's storage state (cookies + localStorage)."""
+def save_session(page, session_file: str = DEFAULT_SESSION_FILE, logger=None, handle=None):
+    """
+    Save the browser context's storage state (cookies + localStorage) together
+    with a `bot_meta` ownership block, so this device can restore the session
+    later without ever picking up somebody else's saved login.
+    """
     try:
         state = page.context.storage_state()
-        Path(session_file).write_text(json.dumps(state, indent=2), encoding="utf-8")
+        if handle is None:
+            handle = get_logged_in_handle(page, logger)
+        state["bot_meta"] = {
+            "saved_by_email": (os.environ.get("LINKEDIN_EMAIL") or "").strip() or None,
+            "machine": socket.gethostname(),
+            "saved_at": _now_iso(),
+            "logged_in_as": _normalise_handle(handle),
+        }
+        Path(session_file).write_text(
+            json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
         if logger:
-            logger.info(f"Session saved to {session_file}")
+            who = state["bot_meta"]["logged_in_as"] or "unknown profile"
+            logger.info(f"Session saved to {session_file} (signed in as {who}).")
     except Exception as e:
         if logger:
             logger.warning(f"Could not save session: {e}")
+
+
+def clear_session(page=None, session_file: str = DEFAULT_SESSION_FILE, logger=None):
+    """
+    Delete a saved session file and, when a page/context is given, drop its
+    cookies too -- so the next navigation cannot silently reuse the account
+    that session belonged to.
+    """
+    try:
+        path = Path(session_file)
+        if path.exists():
+            path.unlink()
+            if logger:
+                logger.info(f"Removed saved session file {session_file}.")
+    except Exception as e:
+        if logger:
+            logger.warning(f"Could not delete {session_file}: {e}")
+
+    if page is not None:
+        try:
+            context = page if hasattr(page, "clear_cookies") else page.context
+            context.clear_cookies()
+            if logger:
+                logger.info("Cleared cookies from the discarded session.")
+        except Exception as e:
+            if logger:
+                logger.warning(f"Could not clear cookies: {e}")
 
 
 def load_session(context_or_page, session_file: str = DEFAULT_SESSION_FILE, logger=None) -> bool:
@@ -240,11 +525,15 @@ def load_session(context_or_page, session_file: str = DEFAULT_SESSION_FILE, logg
 
     `context_or_page` can be either a BrowserContext or a Page.
     Returns True if the session file was loaded successfully.
+
+    NOTE: this only restores cookies. Whether the file is *allowed* to be
+    reused on this machine/account is decided by session_belongs_to_this_user()
+    / login_or_restore() -- use those rather than calling this directly.
     """
     path = Path(session_file)
     if not path.exists():
         if logger:
-            logger.info(f"No session file found at {session_file} — will need to log in.")
+            logger.info(f"No session file found at {session_file} -- will need to log in.")
         return False
 
     try:
@@ -269,10 +558,28 @@ def load_session(context_or_page, session_file: str = DEFAULT_SESSION_FILE, logg
 
 def login_or_restore(page, logger=None, session_file: str = DEFAULT_SESSION_FILE):
     """
-    Try to restore a saved session first. If that fails or the session
-    is expired, do a full auto-login.
+    Restore the saved session if -- and only if -- it belongs to this machine
+    and this .env account; otherwise log in fresh.
+
+    Flow:
+      1. If a session file exists but came from another machine/account (or
+         has no ownership record at all), delete it and clear its cookies so
+         we can't accidentally browse LinkedIn as its owner.
+      2. Otherwise restore it and confirm LinkedIn actually accepts it AND
+         that the signed-in profile handle is the one the file claims.
+      3. Anything else -> full login.
     """
-    if load_session(page, session_file, logger):
+    path = Path(session_file)
+
+    if path.exists() and not session_belongs_to_this_user(session_file, logger):
+        if logger:
+            logger.warning(
+                "Saved session does not belong to this device/account -- discarding it "
+                "and logging in fresh."
+            )
+        clear_session(page, session_file, logger)
+
+    if path.exists() and load_session(page, session_file, logger):
         # Quick check: navigate to the feed and see if we're still logged in
         if logger:
             logger.info("Testing restored session...")
@@ -280,12 +587,22 @@ def login_or_restore(page, logger=None, session_file: str = DEFAULT_SESSION_FILE
 
         # Give it a moment to either load the feed or redirect to login
         time.sleep(2)
+
         if _is_on_feed(page):
+            if _session_account_matches(page, session_file, logger):
+                if logger:
+                    logger.info("Session restored -- already logged in.")
+                return True
             if logger:
-                logger.info("Session restored — already logged in.")
-            return True
-        else:
-            if logger:
-                logger.info("Saved session expired — doing fresh login.")
+                logger.warning(
+                    "The restored session belongs to a different LinkedIn account -- "
+                    "discarding it and logging in fresh."
+                )
+            clear_session(page, session_file, logger)
+            return auto_login(page, logger, session_file)
+
+        if logger:
+            logger.info("Saved session expired -- doing fresh login.")
+        clear_session(page, session_file, logger)
 
     return auto_login(page, logger, session_file)

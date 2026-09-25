@@ -49,16 +49,31 @@ pip install dnspython --break-system-packages   # only needed for Email_finder.p
 playwright install --with-deps chromium
 ```
 
-Create a `.env` file in the project root with your LinkedIn credentials:
+Copy the template and fill in **your own** LinkedIn account:
+
+```bash
+cp .env.example .env            # Windows PowerShell: copy .env.example .env
+```
 
 ```
 LINKEDIN_EMAIL=you@example.com
 LINKEDIN_PASSWORD=your-password
+LINKEDIN_ACCOUNT=your-profile-handle     # optional, see next section
 ```
 
-`.env` and `session.json` (the saved browser session/cookies) are both listed in `.gitignore` — never commit either.
+`.env`, `session.json` (the saved browser session/cookies) and every scraped output file are listed in `.gitignore` — never commit them. Leaving the credentials blank is fine too: the bot then simply pauses and lets you sign in by hand.
 
-> **Note:** this repo's git history already has a `session.json` committed (live LinkedIn cookies). Treat that session as compromised — log out of it / rotate, and avoid re-committing a fresh one.
+## Sessions & accounts (one login per device)
+
+`session.json` holds live LinkedIn cookies for whichever account signed in. It is **per device**, gitignored, and never shared:
+
+- **First run (fresh clone / new machine):** there is no session file, so the login step signs you in yourself — credentials from your `.env` are auto-filled, and you only have to handle 2FA/CAPTCHA. On success the session is written to `session.json` and reused by every later run on that device, so you stay logged in until the session expires.
+- **Every run after that:** the file is reused *only if it provably belongs to you*. Each saved session carries a `bot_meta` block recording the `LINKEDIN_EMAIL` and machine name that saved it, and the profile handle it is signed in as. A session file copied from someone else's machine/account (or one committed to a public repo, which has no `bot_meta` at all) is detected, deleted, and its cookies cleared — you get a fresh login instead of silently ending up in that person's account.
+- Set `LINKEDIN_ACCOUNT` (your profile handle, or your full `linkedin.com/in/...` URL) to also assert *which* account a restored session must be; a mismatch triggers a fresh login.
+- Deleting `session.json` at any time forces the next run to log in again. `--session-file <path>` on any script points it somewhere else entirely.
+- Escape hatch: `LINKEDIN_ALLOW_FOREIGN_SESSION=1` in the environment skips the ownership check (only for deliberately moving *your own* session between *your own* devices).
+
+> **If you ever had a `session.json` committed to a repo:** treat it as compromised — the cookies in it belong to whoever ran the bot. It is gitignored now, so remove it from the working tree and, if it is in history, rotate that account's password and purge it (`git rm --cached session.json`, then `git filter-repo`/BFG if needed).
 
 ## Usage
 
@@ -93,7 +108,7 @@ python Email_finder.py people.json clean_data.json -o email_results.json
 
 Every script also supports `--headless`, `--channel` (e.g. `chrome` to use your installed browser instead of bundled Chromium), `--verbose`, and `--session-file`. Run any script with `--help` for the full flag list.
 
-The first script in a fresh run pauses for you to complete LinkedIn login by hand (credentials from `.env` are auto-filled; you only need to handle 2FA/CAPTCHA checkpoints). The resulting session is saved to `session.json` so later steps and later runs can skip login until it expires.
+The first script in a fresh run logs you into LinkedIn (credentials from `.env` are auto-filled; you only need to handle 2FA/CAPTCHA checkpoints, and if `.env` is missing entirely it pauses for a fully manual login). The resulting session is saved to `session.json` so later steps and later runs on this device can skip login until it expires — see **Sessions & accounts** above for how that file is kept per-device and never reused across accounts.
 
 ## Output files
 
@@ -107,6 +122,7 @@ The first script in a fresh run pauses for you to complete LinkedIn login by han
 | `email_results.json` | `Email_finder.py` | companies -> employees -> SMTP-verified (or guessed) email |
 | `debug_page.html` | any scraper, on selector-miss | last page HTML, for diagnosing a LinkedIn markup change |
 | `run_output/` | a prior manual run | saved snapshot of `companies.txt` / `results.json` / `run.log` |
+| `session.json` | `linkedin_login.py` on first login | **gitignored, per-device** LinkedIn cookies + a `bot_meta` ownership block, reused by later runs on this device |
 
 ## Project structure
 
@@ -117,9 +133,14 @@ json_parser.py                results.json -> clean_data.json
 people_profile_scraper.py     clean_data.json -> people.json
 Email_finder.py               people.json + clean_data.json -> email_results.json
 linkedin_login.py             shared login/session helper used by every scraper
+                              (auto-login, session save/restore, per-device
+                               session ownership checks)
 pipeline.py                   Flask app that orchestrates + streams the above via SSE
 templates/dashboard.html      pipeline dashboard UI
 static/style.css              dashboard styling
+.env.example                  template for your own .env (copy it, then edit)
+.gitignore                    keeps .env, session.json and run output out of git
+session.json                  created on first login -- gitignored, per device
 ```
 
 ## Responsible use

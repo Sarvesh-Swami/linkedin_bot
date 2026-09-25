@@ -29,6 +29,8 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request
 
+from linkedin_login import DEFAULT_SESSION_FILE, read_session_meta, session_belongs_to_this_user
+
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
@@ -152,7 +154,7 @@ def _build_command(step_index: int, config: dict) -> list[str]:
     python = sys.executable
     step = STEPS[step_index]
     script = str(BASE_DIR / step["script"])
-    session_file = str(BASE_DIR / "session.json")
+    session_file = DEFAULT_SESSION_FILE
 
     if step_index == 0:
         # main.py
@@ -510,9 +512,45 @@ def api_results():
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _preflight_notes() -> list[str]:
+    """Human-readable notes about this device's credentials/session state."""
+    notes = []
+
+    if not (BASE_DIR / ".env").exists():
+        notes.append(
+            "No .env found -- copy .env.example to .env and add your own LinkedIn "
+            "account, or just sign in by hand when the browser window opens."
+        )
+
+    if not Path(DEFAULT_SESSION_FILE).exists():
+        notes.append(
+            "No saved session.json yet: the first login step will ask you to sign in "
+            "to LinkedIn. The session is then saved here (gitignored) and reused on "
+            "this device only."
+        )
+    elif not session_belongs_to_this_user(DEFAULT_SESSION_FILE):
+        notes.append(
+            "A saved session.json exists but does NOT belong to this device/account "
+            "(no ownership record, another machine, or another email). It will be "
+            "discarded at run time and you will be asked to sign in again."
+        )
+    else:
+        meta = read_session_meta(DEFAULT_SESSION_FILE) or {}
+        notes.append(
+            "Saved session found for this device "
+            f"(account: {meta.get('logged_in_as') or 'unknown'}, "
+            f"saved: {meta.get('saved_at') or 'unknown'})."
+        )
+
+    return notes
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  LinkedIn Bot Pipeline UI")
     print("  Open http://localhost:5050 in your browser")
+    print("=" * 60)
+    for note in _preflight_notes():
+        print(f"  - {note}")
     print("=" * 60)
     app.run(host="0.0.0.0", port=5050, debug=False, threaded=True)
